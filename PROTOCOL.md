@@ -77,6 +77,7 @@ Watch-facing fields:
 - `sizeBytes`: decoded media size.
 - `metadata.motion`: whether motion was detected for the frame event.
 - `metadata.triggered`: whether the event passed the motion cooldown gate.
+- `metadata.frame_sequence`: camera-daemon capture sequence for the sampled frame.
 
 `payload` is retained as a compatibility alias for `dataBase64`.
 
@@ -110,3 +111,8 @@ messages, and expose them as stream deltas. The bridge should pass through
 `kind`, `source`, `capturedAt`, `modality`, `mediaType`, `dataBase64`,
 `sizeBytes`, `sequence`, and `metadata` so a multimodal model can consume the
 media without guessing the payload shape.
+
+The daemon captures frames continuously by default. The daemon CLI's `--fps`
+controls motion analysis cadence; `--capture-fps` optionally caps camera reads.
+Each WebSocket handshake's `fps` controls only that client's maximum output
+chunk rate.

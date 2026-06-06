@@ -45,6 +45,7 @@ VIDEO_DIR = Path("clips")
 EVENTS_FILE = Path("camera_events.jsonl")
 DEFAULT_CAMERA_URL = "http://192.168.4.1:81/stream"
 DEFAULT_ANALYSIS_FPS = 2  # frames per second to process for motion
+DEFAULT_CAPTURE_FPS = 0  # 0 means read as fast as the camera provides frames
 DEFAULT_COOLDOWN_S = 5  # seconds between motion triggers
 DEFAULT_MOTION_THRESHOLD = 5000  # pixel diff threshold
 DEFAULT_HTTP_PORT = 8081  # for serving latest frame
@@ -88,6 +89,7 @@ class FrameEvent:
     triggered: bool
     cooldown_s: int
     buffer_frames: int
+    frame_sequence: int
 
 
 @dataclass(frozen=True)
@@ -202,17 +204,16 @@ class FrameBuffer:
     def __init__(self, duration_s: float = DEFAULT_VIDEO_BUFFER_S, fps: int = DEFAULT_ANALYSIS_FPS):
         self.duration_s = duration_s
         self.fps = fps
-        self._max_frames = int(duration_s * fps)
         self._frames: list[tuple[float, np.ndarray]] = []
         self._lock = Lock()
 
-    def add_frame(self, frame: np.ndarray):
+    def add_frame(self, frame: np.ndarray, timestamp: float | None = None):
         """Add a frame to the rolling buffer."""
+        timestamp = timestamp or time.time()
         with self._lock:
-            self._frames.append((time.time(), frame))
-            # Trim to max size
-            if len(self._frames) > self._max_frames:
-                self._frames = self._frames[-self._max_frames:]
+            self._frames.append((timestamp, frame))
+            cutoff = timestamp - self.duration_s
+            self._frames = [(captured_at, buffered_frame) for captured_at, buffered_frame in self._frames if captured_at >= cutoff]
 
     def dump_to_video(self, output_path: Path) -> bool:
         """Write the current buffer to an MP4 file. Returns True on success."""
@@ -248,8 +249,9 @@ class FrameBuffer:
             return False
 
         h, w = frames[0][1].shape[:2]
+        fps = estimated_fps(frames, self.fps)
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(output_path), fourcc, self.fps, (w, h))
+        writer = cv2.VideoWriter(str(output_path), fourcc, fps, (w, h))
 
         for _, frame in frames:
             writer.write(frame)
@@ -262,6 +264,40 @@ class FrameBuffer:
     def frame_count(self) -> int:
         with self._lock:
             return len(self._frames)
+
+
+class LatestFrameStore:
+    """Thread-safe holder for the most recent captured frame."""
+
+    def __init__(self):
+        self._lock = Lock()
+        self._frame: np.ndarray | None = None
+        self._timestamp = 0.0
+        self._sequence = 0
+
+    def set(self, frame: np.ndarray, timestamp: float) -> int:
+        with self._lock:
+            self._sequence += 1
+            self._frame = frame
+            self._timestamp = timestamp
+            return self._sequence
+
+    def get(self) -> tuple[np.ndarray, float, int] | None:
+        with self._lock:
+            if self._frame is None:
+                return None
+            return self._frame, self._timestamp, self._sequence
+
+
+def estimated_fps(frames: list[tuple[float, np.ndarray]], fallback: float) -> float:
+    if len(frames) < 2:
+        return fallback
+
+    duration = frames[-1][0] - frames[0][0]
+    if duration <= 0:
+        return fallback
+
+    return max(1.0, min(60.0, (len(frames) - 1) / duration))
 
 
 # ─── Output Manager ──────────────────────────────────────────────────────────
@@ -434,6 +470,7 @@ class StreamDispatcher:
                     "motion": event.motion,
                     "triggered": event.triggered,
                     "buffer_frames": event.buffer_frames,
+                    "frame_sequence": event.frame_sequence,
                 },
             )
 
@@ -450,6 +487,7 @@ class StreamDispatcher:
                     "motion": event.motion,
                     "triggered": event.triggered,
                     "buffer_frames": event.buffer_frames,
+                    "frame_sequence": event.frame_sequence,
                     "duration_s": self.buffer.duration_s,
                 },
             )
@@ -693,6 +731,7 @@ class CameraDaemon:
         self,
         camera_url: str = DEFAULT_CAMERA_URL,
         analysis_fps: int = DEFAULT_ANALYSIS_FPS,
+        capture_fps: float = DEFAULT_CAPTURE_FPS,
         cooldown_s: int = DEFAULT_COOLDOWN_S,
         motion_threshold: int = DEFAULT_MOTION_THRESHOLD,
         http_port: int = DEFAULT_HTTP_PORT,
@@ -701,6 +740,7 @@ class CameraDaemon:
     ):
         self.camera_url = camera_url
         self.analysis_fps = analysis_fps
+        self.capture_fps = capture_fps
         self.cooldown_s = cooldown_s
         self.motion_threshold = motion_threshold
         self.http_port = http_port
@@ -710,6 +750,7 @@ class CameraDaemon:
         self.reader = MJPEGStreamReader(camera_url)
         self.detector = MotionDetector(threshold=motion_threshold)
         self.buffer = FrameBuffer(duration_s=video_buffer_s, fps=analysis_fps)
+        self.latest_frame = LatestFrameStore()
         self.output = OutputManager()
         self.dispatcher = StreamDispatcher(self.buffer)
         self.dispatcher.add_subscription(
@@ -744,10 +785,14 @@ class CameraDaemon:
             log.info(f"WebSocket server started on ws://127.0.0.1:{self.ws_port}")
             await asyncio.Future()
 
-    def _frame_generator(self):
-        """Generate decoded frames from the MJPEG stream at analysis FPS."""
-        frame_interval = 1.0 / self.analysis_fps
-        last_frame_time = 0
+    def start_capture(self):
+        """Start continuously reading frames from the camera."""
+        thread = Thread(target=self._capture_loop, daemon=True)
+        thread.start()
+
+    def _capture_loop(self):
+        capture_interval = 1.0 / self.capture_fps if self.capture_fps > 0 else 0
+        last_capture_time = 0.0
 
         while self.running:
             frame = self.reader.next_frame()
@@ -755,16 +800,44 @@ class CameraDaemon:
                 log.warning("Stream ended, attempting reconnect...")
                 if not self.reader.connect():
                     time.sleep(3)
-                    continue
+                continue
+
+            now = time.time()
+            if capture_interval and now - last_capture_time < capture_interval:
+                continue
+
+            last_capture_time = now
+            sequence = self.latest_frame.set(frame, now)
+            self.buffer.add_frame(frame, now)
+            log.debug(f"Captured frame #{sequence}: {frame.shape}")
+
+    def _analysis_frame_generator(self):
+        """Sample the latest captured frame at analysis FPS."""
+        frame_interval = 1.0 / self.analysis_fps
+        last_frame_time = 0
+        last_sequence = 0
+
+        while self.running:
+            latest = self.latest_frame.get()
+            if latest is None:
+                time.sleep(0.01)
                 continue
 
             now = time.time()
             if now - last_frame_time < frame_interval:
+                time.sleep(min(0.01, frame_interval / 10))
                 continue
+
+            frame, captured_at, sequence = latest
+            if sequence == last_sequence:
+                time.sleep(0.01)
+                continue
+
+            last_sequence = sequence
             last_frame_time = now
 
-            log.debug(f"Frame received: {frame.shape}")
-            yield frame
+            log.debug(f"Analyzing frame #{sequence}: {frame.shape}")
+            yield frame, captured_at, sequence
 
     def run(self):
         """Main daemon loop."""
@@ -776,12 +849,11 @@ class CameraDaemon:
             log.error("Could not connect to camera. Exiting.")
             return
 
+        self.start_capture()
         log.info("Camera daemon running. Waiting for motion...")
         last_trigger_time = 0
 
-        for frame in self._frame_generator():
-            self.buffer.add_frame(frame)
-
+        for frame, captured_at, sequence in self._analysis_frame_generator():
             motion, _ = self.detector.detect(frame)
             now = time.time()
             triggered = motion and (now - last_trigger_time) > self.cooldown_s
@@ -792,11 +864,12 @@ class CameraDaemon:
             self.dispatcher.dispatch(
                 FrameEvent(
                     frame=frame,
-                    timestamp=now,
+                    timestamp=captured_at,
                     motion=motion,
                     triggered=triggered,
                     cooldown_s=self.cooldown_s,
                     buffer_frames=self.buffer.frame_count,
+                    frame_sequence=sequence,
                 )
             )
 
@@ -812,6 +885,7 @@ def main():
     parser = argparse.ArgumentParser(description="ESP32-CAM Camera Daemon")
     parser.add_argument("--url", default=DEFAULT_CAMERA_URL, help="MJPEG stream URL")
     parser.add_argument("--fps", type=int, default=DEFAULT_ANALYSIS_FPS, help="Analysis frame rate")
+    parser.add_argument("--capture-fps", type=float, default=DEFAULT_CAPTURE_FPS, help="Capture frame rate cap; 0 reads as fast as the camera provides")
     parser.add_argument("--cooldown", type=int, default=DEFAULT_COOLDOWN_S, help="Motion cooldown (seconds)")
     parser.add_argument("--threshold", type=int, default=DEFAULT_MOTION_THRESHOLD, help="Motion sensitivity threshold")
     parser.add_argument("--port", type=int, default=DEFAULT_HTTP_PORT, help="HTTP server port")
@@ -826,6 +900,7 @@ def main():
     daemon = CameraDaemon(
         camera_url=args.url,
         analysis_fps=args.fps,
+        capture_fps=args.capture_fps,
         cooldown_s=args.cooldown,
         motion_threshold=args.threshold,
         http_port=args.port,

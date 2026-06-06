@@ -23,7 +23,7 @@ source venv/bin/activate
 python camera_daemon.py
 
 # Custom config
-python camera_daemon.py --url http://192.168.4.1:81/stream --fps 2 --cooldown 5 --threshold 5000 --ws-port 8765
+python camera_daemon.py --url http://192.168.4.1:81/stream --capture-fps 0 --fps 2 --cooldown 5 --threshold 5000 --ws-port 8765
 
 # Test a stream subscription
 python camera_client.py --mode stills --motion-gate false --duration 10 --save-dir /tmp/camera-chunks
@@ -86,12 +86,11 @@ buffer. With `"motionGate": true`, chunks are emitted on motion triggers. See
 ## Architecture (MVP)
 
 1. Frame grabber connects to MJPEG stream
-2. Motion detector compares frames at configured FPS
-3. Camera loop emits normalized frame events
-4. Stream dispatcher routes events to configured subscriptions
+2. Capture loop reads frames continuously, or up to `--capture-fps` when capped
+3. Analysis loop samples the latest captured frame at `--fps` for motion detection
+4. Stream dispatcher routes normalized frame events to configured subscriptions
 5. Built-in archive subscription saves motion JPEGs, rolling MP4 clips, and JSONL events
 6. WebSocket server streams Base64 chunks to client subscriptions
 7. HTTP server serves archived snapshots, clips, and events
 
-Next: move capture closer to full camera FPS while keeping per-client FPS
-throttling in the dispatcher.
+Next: tune continuous video semantics and Watch stream bridge integration.

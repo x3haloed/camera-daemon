@@ -93,6 +93,13 @@ class FrameEvent:
 
 
 @dataclass(frozen=True)
+class BufferedFrame:
+    captured_at: float
+    sequence: int
+    frame: np.ndarray
+
+
+@dataclass(frozen=True)
 class StreamChunk:
     """One output chunk produced for a stream subscription."""
 
@@ -204,16 +211,16 @@ class FrameBuffer:
     def __init__(self, duration_s: float = DEFAULT_VIDEO_BUFFER_S, fps: int = DEFAULT_ANALYSIS_FPS):
         self.duration_s = duration_s
         self.fps = fps
-        self._frames: list[tuple[float, np.ndarray]] = []
+        self._frames: list[BufferedFrame] = []
         self._lock = Lock()
 
-    def add_frame(self, frame: np.ndarray, timestamp: float | None = None):
+    def add_frame(self, frame: np.ndarray, timestamp: float | None = None, sequence: int = 0):
         """Add a frame to the rolling buffer."""
         timestamp = timestamp or time.time()
         with self._lock:
-            self._frames.append((timestamp, frame))
+            self._frames.append(BufferedFrame(timestamp, sequence, frame))
             cutoff = timestamp - self.duration_s
-            self._frames = [(captured_at, buffered_frame) for captured_at, buffered_frame in self._frames if captured_at >= cutoff]
+            self._frames = [buffered_frame for buffered_frame in self._frames if buffered_frame.captured_at >= cutoff]
 
     def dump_to_video(self, output_path: Path) -> bool:
         """Write the current buffer to an MP4 file. Returns True on success."""
@@ -222,13 +229,28 @@ class FrameBuffer:
 
         return self._write_frames_to_video(frames, output_path)
 
-    def to_video_bytes(self) -> bytes:
-        """Encode the current rolling buffer as MP4 bytes."""
+    def frames_since(self, after_sequence: int, through_sequence: int) -> list[BufferedFrame]:
         with self._lock:
-            frames = list(self._frames)
+            return [
+                buffered_frame
+                for buffered_frame in self._frames
+                if after_sequence < buffered_frame.sequence <= through_sequence
+            ]
+
+    def to_video_bytes(self, frames: list[BufferedFrame] | None = None) -> bytes:
+        """Encode buffered frames as MP4 bytes."""
+        if frames is None:
+            with self._lock:
+                frames = list(self._frames)
 
         if not frames:
             raise RuntimeError("No frames in buffer to encode")
+
+        return self._frames_to_video_bytes(frames)
+
+    def _frames_to_video_bytes(self, frames: list[BufferedFrame]) -> bytes:
+        with self._lock:
+            frames = list(frames)
 
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
             temp_path = Path(temp_file.name)
@@ -243,18 +265,18 @@ class FrameBuffer:
             except FileNotFoundError:
                 pass
 
-    def _write_frames_to_video(self, frames: list[tuple[float, np.ndarray]], output_path: Path) -> bool:
+    def _write_frames_to_video(self, frames: list[BufferedFrame], output_path: Path) -> bool:
         if not frames:
             log.warning("No frames in buffer to write")
             return False
 
-        h, w = frames[0][1].shape[:2]
+        h, w = frames[0].frame.shape[:2]
         fps = estimated_fps(frames, self.fps)
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(str(output_path), fourcc, fps, (w, h))
 
-        for _, frame in frames:
-            writer.write(frame)
+        for buffered_frame in frames:
+            writer.write(buffered_frame.frame)
 
         writer.release()
         log.info(f"Wrote {len(frames)} frames to {output_path}")
@@ -289,11 +311,11 @@ class LatestFrameStore:
             return self._frame, self._timestamp, self._sequence
 
 
-def estimated_fps(frames: list[tuple[float, np.ndarray]], fallback: float) -> float:
+def estimated_fps(frames: list[BufferedFrame], fallback: float) -> float:
     if len(frames) < 2:
         return fallback
 
-    duration = frames[-1][0] - frames[0][0]
+    duration = frames[-1].captured_at - frames[0].captured_at
     if duration <= 0:
         return fallback
 
@@ -410,6 +432,8 @@ class StreamDispatcher:
         self._subscriptions: list[StreamSubscription] = []
         self._sinks: list[StreamSink] = []
         self._last_sent: dict[str, float] = {}
+        self._last_video_segment_sequence: dict[str, int] = {}
+        self._video_segment_counts: dict[str, int] = {}
         self._lock = Lock()
 
     def add_subscription(self, subscription: StreamSubscription) -> None:
@@ -420,6 +444,8 @@ class StreamDispatcher:
         with self._lock:
             self._subscriptions = [subscription for subscription in self._subscriptions if subscription.name != name]
             self._last_sent.pop(name, None)
+            self._last_video_segment_sequence.pop(name, None)
+            self._video_segment_counts.pop(name, None)
 
     def add_sink(self, sink: StreamSink) -> None:
         with self._lock:
@@ -453,6 +479,11 @@ class StreamDispatcher:
         if subscription.mode == StreamMode.VIDEO and event.buffer_frames <= 0:
             return False
 
+        if subscription.mode == StreamMode.VIDEO and not subscription.motion_gate:
+            last_segment_sequence = self._last_video_segment_sequence.get(subscription.name, 0)
+            if event.frame_sequence <= last_segment_sequence:
+                return False
+
         last_sent = self._last_sent.get(subscription.name, 0)
         return event.timestamp - last_sent >= 1.0 / subscription.fps
 
@@ -475,7 +506,25 @@ class StreamDispatcher:
             )
 
         if subscription.mode == StreamMode.VIDEO:
-            media_bytes = self.buffer.to_video_bytes()
+            if subscription.motion_gate:
+                frames = None
+                segment_start_sequence = None
+                segment_end_sequence = event.frame_sequence
+                segment_start_at = None
+                segment_end_at = event.timestamp
+            else:
+                last_segment_sequence = self._last_video_segment_sequence.get(subscription.name, 0)
+                frames = self.buffer.frames_since(last_segment_sequence, event.frame_sequence)
+                if not frames:
+                    raise RuntimeError("No frames available for video segment")
+                segment_start_sequence = frames[0].sequence
+                segment_end_sequence = frames[-1].sequence
+                segment_start_at = frames[0].captured_at
+                segment_end_at = frames[-1].captured_at
+                self._last_video_segment_sequence[subscription.name] = segment_end_sequence
+                self._video_segment_counts[subscription.name] = self._video_segment_counts.get(subscription.name, 0) + 1
+
+            media_bytes = self.buffer.to_video_bytes(frames)
             payload = encode_payload(media_bytes, subscription.format)
             return StreamChunk(
                 subscription=subscription,
@@ -489,6 +538,12 @@ class StreamDispatcher:
                     "buffer_frames": event.buffer_frames,
                     "frame_sequence": event.frame_sequence,
                     "duration_s": self.buffer.duration_s,
+                    "segment_kind": "rolling" if subscription.motion_gate else "continuous",
+                    "segment_sequence": self._video_segment_counts.get(subscription.name) if not subscription.motion_gate else None,
+                    "segment_start_at": iso_from_epoch(segment_start_at) if segment_start_at is not None else None,
+                    "segment_end_at": iso_from_epoch(segment_end_at) if segment_end_at is not None else None,
+                    "frame_start_sequence": segment_start_sequence,
+                    "frame_end_sequence": segment_end_sequence,
                 },
             )
 
@@ -808,7 +863,7 @@ class CameraDaemon:
 
             last_capture_time = now
             sequence = self.latest_frame.set(frame, now)
-            self.buffer.add_frame(frame, now)
+            self.buffer.add_frame(frame, now, sequence)
             log.debug(f"Captured frame #{sequence}: {frame.shape}")
 
     def _analysis_frame_generator(self):

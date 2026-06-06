@@ -78,6 +78,12 @@ Watch-facing fields:
 - `metadata.motion`: whether motion was detected for the frame event.
 - `metadata.triggered`: whether the event passed the motion cooldown gate.
 - `metadata.frame_sequence`: camera-daemon capture sequence for the sampled frame.
+- `metadata.segment_kind`: `rolling` for motion-gated video clips, `continuous`
+  for non-overlapping video segments.
+- `metadata.segment_sequence`: per-subscription continuous video segment counter.
+- `metadata.segment_start_at` / `metadata.segment_end_at`: ISO segment bounds.
+- `metadata.frame_start_sequence` / `metadata.frame_end_sequence`: capture
+  sequence bounds for the video segment.
 
 `payload` is retained as a compatibility alias for `dataBase64`.
 
@@ -116,3 +122,13 @@ The daemon captures frames continuously by default. The daemon CLI's `--fps`
 controls motion analysis cadence; `--capture-fps` optionally caps camera reads.
 Each WebSocket handshake's `fps` controls only that client's maximum output
 chunk rate.
+
+## Video Semantics
+
+Video subscriptions have two behaviors:
+
+- With `motionGate: true`, each emitted chunk is a rolling MP4 clip from the
+  current frame buffer. This is useful for "what just happened?" motion events.
+- With `motionGate: false`, each emitted chunk is a non-overlapping continuous
+  MP4 segment. The daemon tracks the last frame sequence emitted to each
+  subscription and sends only newly captured frames in the next chunk.

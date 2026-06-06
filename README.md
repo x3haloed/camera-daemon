@@ -79,9 +79,9 @@ The server responds with an `ack`, then sends `chunk` messages:
 ```
 
 For still streams, `mediaType` is `image/jpeg`. For video streams, `mediaType`
-is `video/mp4` and each payload is an MP4 encoded from the current rolling
-buffer. With `"motionGate": true`, chunks are emitted on motion triggers. See
-`PROTOCOL.md` for the full Watch-facing contract.
+is `video/mp4`. With `"motionGate": true`, video chunks are rolling clips from
+the current buffer. With `"motionGate": false`, video chunks are continuous
+non-overlapping segments. See `PROTOCOL.md` for the full Watch-facing contract.
 
 ## Architecture (MVP)
 
@@ -93,4 +93,4 @@ buffer. With `"motionGate": true`, chunks are emitted on motion triggers. See
 6. WebSocket server streams Base64 chunks to client subscriptions
 7. HTTP server serves archived snapshots, clips, and events
 
-Next: tune continuous video semantics and Watch stream bridge integration.
+Next: Watch stream bridge integration.

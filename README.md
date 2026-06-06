@@ -6,6 +6,8 @@ detects motion, and dispatches camera events to output subscriptions.
 ## Structure
 
 - `camera_daemon.py` — main daemon: stream reader, motion detector, stream dispatcher, WebSocket server, snapshot/video archive, HTTP server
+- `camera_client.py` — WebSocket client fixture for testing stream subscriptions
+- `PROTOCOL.md` — WebSocket handshake and message contract
 - `requirements.txt` — Python dependencies (opencv-python, requests, websockets)
 - `snapshots/` — motion-triggered JPEGs (auto-created)
 - `clips/` — motion-triggered rolling MP4 clips (auto-created)
@@ -22,6 +24,9 @@ python camera_daemon.py
 
 # Custom config
 python camera_daemon.py --url http://192.168.4.1:81/stream --fps 2 --cooldown 5 --threshold 5000 --ws-port 8765
+
+# Test a stream subscription
+python camera_client.py --mode stills --motion-gate false --duration 10 --save-dir /tmp/camera-chunks
 ```
 
 ## HTTP Endpoints
@@ -52,12 +57,19 @@ The server responds with an `ack`, then sends `chunk` messages:
 ```json
 {
   "type": "chunk",
+  "kind": "camera_media_chunk",
+  "source": "camera-daemon",
   "subscription": "ws-...",
+  "sequence": 1,
   "timestamp": 1780692497.0,
+  "capturedAt": "2026-06-05T21:08:17Z",
   "mode": "stills",
+  "modality": "image",
   "format": "base64",
   "mediaType": "image/jpeg",
   "payload": "...",
+  "dataBase64": "...",
+  "sizeBytes": 12345,
   "metadata": {
     "motion": true,
     "triggered": true,
@@ -68,7 +80,8 @@ The server responds with an `ack`, then sends `chunk` messages:
 
 For still streams, `mediaType` is `image/jpeg`. For video streams, `mediaType`
 is `video/mp4` and each payload is an MP4 encoded from the current rolling
-buffer. With `"motionGate": true`, chunks are emitted on motion triggers.
+buffer. With `"motionGate": true`, chunks are emitted on motion triggers. See
+`PROTOCOL.md` for the full Watch-facing contract.
 
 ## Architecture (MVP)
 

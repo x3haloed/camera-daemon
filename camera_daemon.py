@@ -98,6 +98,7 @@ class StreamChunk:
     timestamp: float
     media_type: str
     payload: str | bytes
+    size_bytes: int
     metadata: dict = field(default_factory=dict)
 
 
@@ -421,12 +422,14 @@ class StreamDispatcher:
 
     def _build_chunk(self, subscription: StreamSubscription, event: FrameEvent) -> StreamChunk:
         if subscription.mode == StreamMode.STILLS:
-            payload = encode_payload(encode_frame_as_jpeg(event.frame), subscription.format)
+            media_bytes = encode_frame_as_jpeg(event.frame)
+            payload = encode_payload(media_bytes, subscription.format)
             return StreamChunk(
                 subscription=subscription,
                 timestamp=event.timestamp,
                 media_type="image/jpeg",
                 payload=payload,
+                size_bytes=len(media_bytes),
                 metadata={
                     "motion": event.motion,
                     "triggered": event.triggered,
@@ -435,12 +438,14 @@ class StreamDispatcher:
             )
 
         if subscription.mode == StreamMode.VIDEO:
-            payload = encode_payload(self.buffer.to_video_bytes(), subscription.format)
+            media_bytes = self.buffer.to_video_bytes()
+            payload = encode_payload(media_bytes, subscription.format)
             return StreamChunk(
                 subscription=subscription,
                 timestamp=event.timestamp,
                 media_type="video/mp4",
                 payload=payload,
+                size_bytes=len(media_bytes),
                 metadata={
                     "motion": event.motion,
                     "triggered": event.triggered,
@@ -461,20 +466,31 @@ class WebSocketClientSink:
     def __init__(self, subscription_name: str, max_queue_size: int = 3):
         self.subscription_name = subscription_name
         self.queue: Queue[dict | None] = Queue(maxsize=max_queue_size)
+        self.sequence = 0
 
     def handle_chunk(self, chunk: StreamChunk, event: FrameEvent, buffer: FrameBuffer) -> None:
         if chunk.subscription.name != self.subscription_name:
             return
+        self.sequence += 1
+        data_base64 = chunk.payload if isinstance(chunk.payload, str) else base64.b64encode(chunk.payload).decode("ascii")
 
         message = {
             "type": "chunk",
+            "kind": "camera_media_chunk",
+            "source": "camera-daemon",
             "subscription": chunk.subscription.name,
+            "sequence": self.sequence,
             "timestamp": chunk.timestamp,
+            "capturedAt": iso_from_epoch(chunk.timestamp),
             "mode": chunk.subscription.mode.value,
+            "modality": modality_for_media_type(chunk.media_type),
             "format": chunk.subscription.format.value,
             "mediaType": chunk.media_type,
             "payload": chunk.payload,
+            "dataBase64": data_base64,
+            "sizeBytes": chunk.size_bytes,
             "metadata": chunk.metadata,
+            "hint": "Inject dataBase64 as media in the next Sounding delta.",
         }
 
         try:
@@ -593,6 +609,18 @@ def parse_bool(value) -> bool:
     if isinstance(value, str):
         return value.lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def iso_from_epoch(timestamp: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
+
+
+def modality_for_media_type(media_type: str) -> str:
+    if media_type.startswith("image/"):
+        return "image"
+    if media_type.startswith("video/"):
+        return "video"
+    return "file"
 
 
 # ─── HTTP Server for Latest Frame ────────────────────────────────────────────

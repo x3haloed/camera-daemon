@@ -5,22 +5,32 @@ Camera Daemon — ESP32-CAM video pipeline for Watch.
 Connects to the ESP32-CAM MJPEG stream, decodes frames,
 performs motion detection, and outputs events for Watch consumption.
 
-MVP: Single hardcoded stream, motion-gated stills output.
-Phase 2: WebSocket server for multi-client configurable streams.
+MVP: Motion-gated archive output plus WebSocket still/video subscriptions.
+Next: Full-FPS capture with per-client throttling.
 """
 
 import argparse
+import asyncio
+import base64
+from dataclasses import dataclass, field
 import json
 import logging
 import os
+from queue import Empty, Full, Queue
+import tempfile
 import time
+from enum import Enum
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from threading import Lock, Thread
+from typing import Protocol
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import cv2
 import numpy as np
+import websockets
+from websockets.exceptions import ConnectionClosed
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,7 +48,65 @@ DEFAULT_ANALYSIS_FPS = 2  # frames per second to process for motion
 DEFAULT_COOLDOWN_S = 5  # seconds between motion triggers
 DEFAULT_MOTION_THRESHOLD = 5000  # pixel diff threshold
 DEFAULT_HTTP_PORT = 8081  # for serving latest frame
+DEFAULT_WS_PORT = 8765  # for streaming subscription clients
 DEFAULT_VIDEO_BUFFER_S = 3  # seconds of rolling video buffer
+
+
+# ─── Stream Events and Subscriptions ─────────────────────────────────────────
+
+
+class StreamMode(str, Enum):
+    STILLS = "stills"
+    VIDEO = "video"
+
+
+class StreamFormat(str, Enum):
+    BASE64 = "base64"
+    BINARY = "binary"
+    FILE = "file"
+
+
+@dataclass(frozen=True)
+class StreamSubscription:
+    """Describes what one output listener wants from the camera pipeline."""
+
+    name: str
+    mode: StreamMode = StreamMode.STILLS
+    fps: float = 1.0
+    duration_s: float | None = None
+    motion_gate: bool = True
+    format: StreamFormat = StreamFormat.BASE64
+
+
+@dataclass(frozen=True)
+class FrameEvent:
+    """Normalized frame event emitted by the camera pipeline."""
+
+    frame: np.ndarray
+    timestamp: float
+    motion: bool
+    triggered: bool
+    cooldown_s: int
+    buffer_frames: int
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    """One output chunk produced for a stream subscription."""
+
+    subscription: StreamSubscription
+    timestamp: float
+    media_type: str
+    payload: str | bytes
+    metadata: dict = field(default_factory=dict)
+
+
+class StreamSink(Protocol):
+    """Receives normalized chunks from the dispatcher."""
+
+    def handle_chunk(self, chunk: StreamChunk, event: FrameEvent, buffer: "FrameBuffer") -> None:
+        ...
+
 
 # ─── MJPEG Stream Reader ────────────────────────────────────────────────────
 
@@ -150,6 +218,30 @@ class FrameBuffer:
         with self._lock:
             frames = list(self._frames)
 
+        return self._write_frames_to_video(frames, output_path)
+
+    def to_video_bytes(self) -> bytes:
+        """Encode the current rolling buffer as MP4 bytes."""
+        with self._lock:
+            frames = list(self._frames)
+
+        if not frames:
+            raise RuntimeError("No frames in buffer to encode")
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
+            temp_path = Path(temp_file.name)
+
+        try:
+            if not self._write_frames_to_video(frames, temp_path):
+                raise RuntimeError("Failed to encode video buffer")
+            return temp_path.read_bytes()
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _write_frames_to_video(self, frames: list[tuple[float, np.ndarray]], output_path: Path) -> bool:
         if not frames:
             log.warning("No frames in buffer to write")
             return False
@@ -227,6 +319,282 @@ class OutputManager:
             return str(self._last_video_path) if self._last_video_path else None
 
 
+# ─── Stream Dispatcher ───────────────────────────────────────────────────────
+
+
+def encode_frame_as_jpeg(frame: np.ndarray, quality: int = 85) -> bytes:
+    """Encode an OpenCV frame as JPEG bytes."""
+    ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise RuntimeError("Failed to encode frame as JPEG")
+    return encoded.tobytes()
+
+
+def encode_payload(payload: bytes, stream_format: StreamFormat) -> str | bytes:
+    """Encode a media payload according to the subscription format."""
+    if stream_format == StreamFormat.BASE64:
+        return base64.b64encode(payload).decode("ascii")
+    return payload
+
+
+class FileArchiveSink:
+    """Archives motion-triggered still/video chunks for the current HTTP API."""
+
+    def __init__(self, output_manager: OutputManager):
+        self.output = output_manager
+
+    def handle_chunk(self, chunk: StreamChunk, event: FrameEvent, buffer: FrameBuffer) -> None:
+        if not event.triggered:
+            return
+
+        if chunk.subscription.mode == StreamMode.STILLS:
+            filename = self.output.save_snapshot(event.frame)
+            timestamp = int(event.timestamp)
+            video_path = VIDEO_DIR / f"clip_{timestamp}.mp4"
+            buffer.dump_to_video(video_path)
+            self.output.save_video_clip(video_path)
+            self.output.log_event(
+                "motion_detected",
+                filename=filename,
+                details={
+                    "cooldown": event.cooldown_s,
+                    "video_clip": video_path.name,
+                    "buffer_frames": event.buffer_frames,
+                    "subscription": chunk.subscription.name,
+                },
+            )
+
+
+class StreamDispatcher:
+    """Routes camera frame events to configured output subscriptions."""
+
+    def __init__(self, buffer: FrameBuffer):
+        self.buffer = buffer
+        self._subscriptions: list[StreamSubscription] = []
+        self._sinks: list[StreamSink] = []
+        self._last_sent: dict[str, float] = {}
+        self._lock = Lock()
+
+    def add_subscription(self, subscription: StreamSubscription) -> None:
+        with self._lock:
+            self._subscriptions.append(subscription)
+
+    def remove_subscription(self, name: str) -> None:
+        with self._lock:
+            self._subscriptions = [subscription for subscription in self._subscriptions if subscription.name != name]
+            self._last_sent.pop(name, None)
+
+    def add_sink(self, sink: StreamSink) -> None:
+        with self._lock:
+            self._sinks.append(sink)
+
+    def remove_sink(self, sink: StreamSink) -> None:
+        with self._lock:
+            self._sinks = [existing for existing in self._sinks if existing is not sink]
+
+    def dispatch(self, event: FrameEvent) -> None:
+        with self._lock:
+            subscriptions = list(self._subscriptions)
+            sinks = list(self._sinks)
+
+        for subscription in subscriptions:
+            if not self._should_emit(subscription, event):
+                continue
+
+            chunk = self._build_chunk(subscription, event)
+            self._last_sent[subscription.name] = event.timestamp
+            for sink in sinks:
+                sink.handle_chunk(chunk, event, self.buffer)
+
+    def _should_emit(self, subscription: StreamSubscription, event: FrameEvent) -> bool:
+        if subscription.motion_gate and not event.triggered:
+            return False
+
+        if subscription.fps <= 0:
+            return False
+
+        if subscription.mode == StreamMode.VIDEO and event.buffer_frames <= 0:
+            return False
+
+        last_sent = self._last_sent.get(subscription.name, 0)
+        return event.timestamp - last_sent >= 1.0 / subscription.fps
+
+    def _build_chunk(self, subscription: StreamSubscription, event: FrameEvent) -> StreamChunk:
+        if subscription.mode == StreamMode.STILLS:
+            payload = encode_payload(encode_frame_as_jpeg(event.frame), subscription.format)
+            return StreamChunk(
+                subscription=subscription,
+                timestamp=event.timestamp,
+                media_type="image/jpeg",
+                payload=payload,
+                metadata={
+                    "motion": event.motion,
+                    "triggered": event.triggered,
+                    "buffer_frames": event.buffer_frames,
+                },
+            )
+
+        if subscription.mode == StreamMode.VIDEO:
+            payload = encode_payload(self.buffer.to_video_bytes(), subscription.format)
+            return StreamChunk(
+                subscription=subscription,
+                timestamp=event.timestamp,
+                media_type="video/mp4",
+                payload=payload,
+                metadata={
+                    "motion": event.motion,
+                    "triggered": event.triggered,
+                    "buffer_frames": event.buffer_frames,
+                    "duration_s": self.buffer.duration_s,
+                },
+            )
+
+        raise NotImplementedError(f"Unsupported stream mode: {subscription.mode}")
+
+
+# ─── WebSocket Streaming ─────────────────────────────────────────────────────
+
+
+class WebSocketClientSink:
+    """Queues chunks for a single WebSocket client."""
+
+    def __init__(self, subscription_name: str, max_queue_size: int = 3):
+        self.subscription_name = subscription_name
+        self.queue: Queue[dict | None] = Queue(maxsize=max_queue_size)
+
+    def handle_chunk(self, chunk: StreamChunk, event: FrameEvent, buffer: FrameBuffer) -> None:
+        if chunk.subscription.name != self.subscription_name:
+            return
+
+        message = {
+            "type": "chunk",
+            "subscription": chunk.subscription.name,
+            "timestamp": chunk.timestamp,
+            "mode": chunk.subscription.mode.value,
+            "format": chunk.subscription.format.value,
+            "mediaType": chunk.media_type,
+            "payload": chunk.payload,
+            "metadata": chunk.metadata,
+        }
+
+        try:
+            self.queue.put_nowait(message)
+        except Full:
+            try:
+                self.queue.get_nowait()
+            except Empty:
+                pass
+            self.queue.put_nowait(message)
+
+    def close(self) -> None:
+        try:
+            self.queue.put_nowait(None)
+        except Full:
+            try:
+                self.queue.get_nowait()
+            except Empty:
+                pass
+            self.queue.put_nowait(None)
+
+
+class WebSocketStreamServer:
+    """Accepts WebSocket subscription handshakes and streams dispatcher chunks."""
+
+    def __init__(self, dispatcher: StreamDispatcher):
+        self.dispatcher = dispatcher
+
+    async def handle_client(self, websocket):
+        subscription = None
+        sink = None
+
+        try:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=10)
+            subscription = self._parse_subscription(raw)
+            sink = WebSocketClientSink(subscription.name)
+
+            self.dispatcher.add_subscription(subscription)
+            self.dispatcher.add_sink(sink)
+
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "ack",
+                        "subscription": subscription.name,
+                        "mode": subscription.mode.value,
+                        "fps": subscription.fps,
+                        "motionGate": subscription.motion_gate,
+                        "format": subscription.format.value,
+                    }
+                )
+            )
+            log.info(f"WebSocket subscription connected: {subscription.name}")
+
+            deadline = time.time() + subscription.duration_s if subscription.duration_s else None
+            while True:
+                if deadline and time.time() >= deadline:
+                    await websocket.send(json.dumps({"type": "complete", "subscription": subscription.name}))
+                    break
+
+                try:
+                    message = await asyncio.wait_for(asyncio.to_thread(sink.queue.get), timeout=1)
+                except asyncio.TimeoutError:
+                    await websocket.ping()
+                    continue
+
+                if message is None:
+                    break
+                await websocket.send(json.dumps(message))
+
+        except (ConnectionClosed, asyncio.TimeoutError):
+            pass
+        except ValueError as e:
+            await websocket.send(json.dumps({"type": "error", "message": str(e)}))
+        finally:
+            if subscription:
+                self.dispatcher.remove_subscription(subscription.name)
+            if sink:
+                sink.close()
+                self.dispatcher.remove_sink(sink)
+            if subscription:
+                log.info(f"WebSocket subscription disconnected: {subscription.name}")
+
+    def _parse_subscription(self, raw: str | bytes) -> StreamSubscription:
+        try:
+            config = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON handshake: {e}") from e
+
+        mode = StreamMode(config.get("mode", StreamMode.STILLS.value))
+        stream_format = StreamFormat(config.get("format", StreamFormat.BASE64.value))
+        fps = float(config.get("fps", 1))
+        duration_s = config.get("duration")
+        motion_gate = parse_bool(config.get("motionGate", config.get("motion_gate", True)))
+
+        if mode not in {StreamMode.STILLS, StreamMode.VIDEO}:
+            raise ValueError("mode must be 'stills' or 'video'")
+        if stream_format != StreamFormat.BASE64:
+            raise ValueError("Only base64 format is supported by WebSocket streams")
+        if fps <= 0:
+            raise ValueError("fps must be greater than 0")
+
+        return StreamSubscription(
+            name=f"ws-{uuid4().hex}",
+            mode=mode,
+            fps=fps,
+            duration_s=float(duration_s) if duration_s is not None else None,
+            motion_gate=motion_gate,
+            format=stream_format,
+        )
+
+
+def parse_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 # ─── HTTP Server for Latest Frame ────────────────────────────────────────────
 
 
@@ -300,6 +668,7 @@ class CameraDaemon:
         cooldown_s: int = DEFAULT_COOLDOWN_S,
         motion_threshold: int = DEFAULT_MOTION_THRESHOLD,
         http_port: int = DEFAULT_HTTP_PORT,
+        ws_port: int = DEFAULT_WS_PORT,
         video_buffer_s: float = DEFAULT_VIDEO_BUFFER_S,
     ):
         self.camera_url = camera_url
@@ -307,12 +676,25 @@ class CameraDaemon:
         self.cooldown_s = cooldown_s
         self.motion_threshold = motion_threshold
         self.http_port = http_port
+        self.ws_port = ws_port
         self.running = False
 
         self.reader = MJPEGStreamReader(camera_url)
         self.detector = MotionDetector(threshold=motion_threshold)
         self.buffer = FrameBuffer(duration_s=video_buffer_s, fps=analysis_fps)
         self.output = OutputManager()
+        self.dispatcher = StreamDispatcher(self.buffer)
+        self.dispatcher.add_subscription(
+            StreamSubscription(
+                name="motion-archive",
+                mode=StreamMode.STILLS,
+                fps=analysis_fps,
+                motion_gate=True,
+                format=StreamFormat.FILE,
+            )
+        )
+        self.dispatcher.add_sink(FileArchiveSink(self.output))
+        self.websocket_server = WebSocketStreamServer(self.dispatcher)
 
         # Wire up HTTP handler
         SnapshotHandler.output_manager = self.output
@@ -323,6 +705,16 @@ class CameraDaemon:
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
         log.info(f"HTTP server started on http://127.0.0.1:{self.http_port}")
+
+    def start_websocket(self):
+        """Start the WebSocket server for streaming subscriptions."""
+        thread = Thread(target=lambda: asyncio.run(self._run_websocket_server()), daemon=True)
+        thread.start()
+
+    async def _run_websocket_server(self):
+        async with websockets.serve(self.websocket_server.handle_client, "127.0.0.1", self.ws_port):
+            log.info(f"WebSocket server started on ws://127.0.0.1:{self.ws_port}")
+            await asyncio.Future()
 
     def _frame_generator(self):
         """Generate decoded frames from the MJPEG stream at analysis FPS."""
@@ -350,6 +742,7 @@ class CameraDaemon:
         """Main daemon loop."""
         self.running = True
         self.start_http()
+        self.start_websocket()
 
         if not self.reader.connect():
             log.error("Could not connect to camera. Exiting.")
@@ -359,26 +752,25 @@ class CameraDaemon:
         last_trigger_time = 0
 
         for frame in self._frame_generator():
-            # Add every frame to the rolling buffer
             self.buffer.add_frame(frame)
 
             motion, _ = self.detector.detect(frame)
             now = time.time()
+            triggered = motion and (now - last_trigger_time) > self.cooldown_s
 
-            if motion and (now - last_trigger_time) > self.cooldown_s:
+            if triggered:
                 last_trigger_time = now
-                # Save snapshot
-                filename = self.output.save_snapshot(frame)
-                # Save video clip from buffer
-                timestamp = int(time.time())
-                video_path = Path(VIDEO_DIR) / f"clip_{timestamp}.mp4"
-                self.buffer.dump_to_video(video_path)
-                self.output.save_video_clip(video_path)
-                self.output.log_event(
-                    "motion_detected",
-                    filename=filename,
-                    details={"cooldown": self.cooldown_s, "video_clip": video_path.name, "buffer_frames": self.buffer.frame_count},
+
+            self.dispatcher.dispatch(
+                FrameEvent(
+                    frame=frame,
+                    timestamp=now,
+                    motion=motion,
+                    triggered=triggered,
+                    cooldown_s=self.cooldown_s,
+                    buffer_frames=self.buffer.frame_count,
                 )
+            )
 
     def stop(self):
         self.running = False
@@ -395,6 +787,7 @@ def main():
     parser.add_argument("--cooldown", type=int, default=DEFAULT_COOLDOWN_S, help="Motion cooldown (seconds)")
     parser.add_argument("--threshold", type=int, default=DEFAULT_MOTION_THRESHOLD, help="Motion sensitivity threshold")
     parser.add_argument("--port", type=int, default=DEFAULT_HTTP_PORT, help="HTTP server port")
+    parser.add_argument("--ws-port", type=int, default=DEFAULT_WS_PORT, help="WebSocket streaming port")
     parser.add_argument("--buffer", type=float, default=DEFAULT_VIDEO_BUFFER_S, help="Rolling video buffer duration (seconds)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
@@ -408,6 +801,7 @@ def main():
         cooldown_s=args.cooldown,
         motion_threshold=args.threshold,
         http_port=args.port,
+        ws_port=args.ws_port,
         video_buffer_s=args.buffer,
     )
 

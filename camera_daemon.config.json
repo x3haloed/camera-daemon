@@ -1,0 +1,39 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "httpPort": 8081,
+    "wsPort": 8765
+  },
+  "limits": {
+    "maxFps": 10.0,
+    "maxResolution": {
+      "width": 1280,
+      "height": 720
+    },
+    "maxClipSeconds": 10.0,
+    "maxConcurrentActiveCameras": 2,
+    "clientQueueSize": 3,
+    "healthLogSize": 100
+  },
+  "defaults": {
+    "fps": 2.0,
+    "resolution": {
+      "width": 640,
+      "height": 480
+    },
+    "motionGate": false,
+    "motionThreshold": 5000,
+    "cooldownSeconds": 5.0,
+    "clipSeconds": 3.0
+  },
+  "healthPollSeconds": 10.0,
+  "idleGraceSeconds": 2.0,
+  "cameras": [
+    {
+      "id": "esp32-cam",
+      "nickname": "ESP32-CAM",
+      "streamUrl": "http://192.168.128.115:81/stream",
+      "enabled": true
+    }
+  ]
+}

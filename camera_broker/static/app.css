@@ -1,0 +1,433 @@
+:root {
+  color-scheme: dark;
+  --bg: #111315;
+  --panel: #191d20;
+  --panel-2: #20262a;
+  --line: #30383d;
+  --text: #ecf1f3;
+  --muted: #9eabb1;
+  --green: #48c78e;
+  --amber: #ffbf69;
+  --red: #ff6b6b;
+  --blue: #6bb7ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button,
+select,
+input {
+  border: 1px solid var(--line);
+  background: #121619;
+  color: var(--text);
+}
+
+button {
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.primary {
+  border-color: #4aa377;
+  background: #1f6f50;
+}
+
+.icon-button {
+  width: 36px;
+  padding: 0;
+  font-size: 18px;
+}
+
+.shell {
+  min-height: 100vh;
+  padding: 18px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 24px;
+  font-weight: 700;
+}
+
+h2 {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+h3 {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.topbar p,
+.viewer-toolbar p {
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.status-pills {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.pill.good {
+  color: var(--green);
+  border-color: rgba(72, 199, 142, 0.45);
+}
+
+.pill.bad {
+  color: var(--red);
+  border-color: rgba(255, 107, 107, 0.45);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr) minmax(260px, 320px);
+  gap: 14px;
+  align-items: start;
+}
+
+.camera-list,
+.viewer,
+.controls,
+.log-panel {
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.camera-list,
+.controls {
+  padding: 12px;
+}
+
+.section-title,
+.viewer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.camera-item {
+  width: 100%;
+  min-height: 76px;
+  padding: 10px;
+  text-align: left;
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.camera-item.selected {
+  border-color: var(--blue);
+}
+
+.camera-item strong,
+.camera-item span {
+  display: block;
+}
+
+.camera-item span {
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.camera-badges {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #111619;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.badge.good {
+  color: var(--green);
+}
+
+.badge.warn {
+  color: var(--amber);
+}
+
+.viewer {
+  overflow: hidden;
+}
+
+.viewer-toolbar {
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.toolbar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.media-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  min-height: 300px;
+  background: #090b0c;
+}
+
+.media-stage img,
+.media-stage video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.empty-state {
+  color: var(--muted);
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+}
+
+.metric {
+  min-width: 0;
+  padding: 10px 12px;
+  border-right: 1px solid var(--line);
+}
+
+.metric:last-child {
+  border-right: 0;
+}
+
+.metric span,
+label span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.metric strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 4px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.controls {
+  display: grid;
+  gap: 12px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+}
+
+input,
+select {
+  width: 100%;
+  min-height: 36px;
+  border-radius: 6px;
+  padding: 0 9px;
+}
+
+input[type="range"] {
+  padding: 0;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.check-row input {
+  width: 18px;
+  min-height: 18px;
+}
+
+.effective {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+pre {
+  overflow: auto;
+  max-height: 170px;
+  margin: 8px 0 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #101315;
+  color: #d6dee2;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.log-panel {
+  margin-top: 14px;
+  padding: 12px;
+}
+
+.log-tools {
+  display: flex;
+  gap: 8px;
+}
+
+.log-tools select {
+  width: 120px;
+}
+
+.log-list {
+  display: grid;
+  gap: 6px;
+  max-height: 300px;
+  overflow: auto;
+  margin-top: 12px;
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: 170px 90px 1fr;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #121619;
+}
+
+.log-row time,
+.log-row span {
+  color: var(--muted);
+}
+
+.log-row.error strong {
+  color: var(--red);
+}
+
+.log-row.warning strong {
+  color: var(--amber);
+}
+
+.log-row.client strong {
+  color: var(--blue);
+}
+
+@media (max-width: 1080px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .camera-list,
+  .controls {
+    order: initial;
+  }
+}
+
+@media (max-width: 640px) {
+  .shell {
+    padding: 10px;
+  }
+
+  .topbar,
+  .viewer-toolbar,
+  .section-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .toolbar-actions,
+  .log-tools,
+  .status-pills {
+    width: 100%;
+  }
+
+  .toolbar-actions button,
+  .log-tools button,
+  .log-tools select {
+    flex: 1;
+  }
+
+  .metrics-grid,
+  .split {
+    grid-template-columns: 1fr;
+  }
+
+  .metric {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .log-row {
+    grid-template-columns: 1fr;
+  }
+}

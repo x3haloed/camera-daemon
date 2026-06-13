@@ -22,6 +22,10 @@ python camera_client.py --camera-id esp32-cam --mode stills --fps 2 --duration 1
 python camera_client.py --camera-id esp32-cam --mode video --clip-seconds 5 --save-dir /tmp/camera-chunks
 ```
 
+Open `http://127.0.0.1:8081/` for the local operator console. It lists
+cameras, starts/stops WebSocket subscriptions, shows still/video output, exposes
+effective clamped settings, and streams the in-memory broker log.
+
 The daemon creates a default config if none exists:
 
 ```json
@@ -42,6 +46,8 @@ Config is file-only in v1; restart the daemon after edits.
 
 ## HTTP Status Endpoints
 
+- `GET /` - local camera operator console
+- `GET /config` - config values needed by the console
 - `GET /health` - daemon status, active counts, and recent in-memory health events
 - `GET /cameras` - configured cameras with liveness/runtime state
 - `GET /subscriptions` - active subscriptions without media payloads

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Camera Broker</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Camera Broker</h1>
+          <p id="brokerSummary">Loading broker status...</p>
+        </div>
+        <div class="status-pills">
+          <span class="pill" id="connectionPill">Idle</span>
+          <span class="pill" id="activePill">0 active</span>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="camera-list">
+          <div class="section-title">
+            <h2>Cameras</h2>
+            <button id="refreshButton" class="icon-button" title="Refresh status" aria-label="Refresh status">↻</button>
+          </div>
+          <div id="cameraList" class="list"></div>
+        </aside>
+
+        <section class="viewer">
+          <div class="viewer-toolbar">
+            <div>
+              <h2 id="selectedCameraName">No camera selected</h2>
+              <p id="selectedCameraMeta">Select a camera to subscribe.</p>
+            </div>
+            <div class="toolbar-actions">
+              <button id="connectButton" class="primary">Connect</button>
+              <button id="disconnectButton" disabled>Disconnect</button>
+            </div>
+          </div>
+
+          <div class="media-stage" id="mediaStage">
+            <div class="empty-state">Waiting for media</div>
+            <img id="stillFrame" alt="Latest camera frame" hidden>
+            <video id="videoFrame" controls muted playsinline hidden></video>
+          </div>
+
+          <div class="metrics-grid">
+            <div class="metric">
+              <span>Frames</span>
+              <strong id="frameCount">0</strong>
+            </div>
+            <div class="metric">
+              <span>Last chunk</span>
+              <strong id="lastChunk">-</strong>
+            </div>
+            <div class="metric">
+              <span>Payload</span>
+              <strong id="payloadSize">-</strong>
+            </div>
+            <div class="metric">
+              <span>Motion</span>
+              <strong id="motionScore">-</strong>
+            </div>
+          </div>
+        </section>
+
+        <aside class="controls">
+          <div class="section-title">
+            <h2>Subscription</h2>
+          </div>
+
+          <label>
+            <span>Mode</span>
+            <select id="modeInput">
+              <option value="stills">Stills</option>
+              <option value="video">Video</option>
+            </select>
+          </label>
+
+          <label>
+            <span>FPS <output id="fpsValue">2</output></span>
+            <input id="fpsInput" type="range" min="1" max="10" step="1" value="2">
+          </label>
+
+          <div class="split">
+            <label>
+              <span>Width</span>
+              <input id="widthInput" type="number" min="1" value="640">
+            </label>
+            <label>
+              <span>Height</span>
+              <input id="heightInput" type="number" min="1" value="480">
+            </label>
+          </div>
+
+          <label class="check-row">
+            <input id="motionGateInput" type="checkbox">
+            <span>Motion gate</span>
+          </label>
+
+          <label>
+            <span>Motion threshold</span>
+            <input id="thresholdInput" type="number" min="0" value="5000">
+          </label>
+
+          <div class="split">
+            <label>
+              <span>Cooldown</span>
+              <input id="cooldownInput" type="number" min="0.1" step="0.1" value="5">
+            </label>
+            <label>
+              <span>Clip seconds</span>
+              <input id="clipInput" type="number" min="0.1" step="0.1" value="3">
+            </label>
+          </div>
+
+          <label>
+            <span>Duration seconds</span>
+            <input id="durationInput" type="number" min="0" step="1" placeholder="Open ended">
+          </label>
+
+          <div class="effective">
+            <h3>Effective</h3>
+            <pre id="effectiveOutput">{}</pre>
+          </div>
+        </aside>
+      </main>
+
+      <section class="log-panel">
+        <div class="section-title">
+          <h2>Log</h2>
+          <div class="log-tools">
+            <select id="logLevelFilter" aria-label="Log level filter">
+              <option value="all">All</option>
+              <option value="error">Errors</option>
+              <option value="warning">Warnings</option>
+              <option value="info">Info</option>
+              <option value="client">Client</option>
+            </select>
+            <button id="clearLogButton">Clear local</button>
+          </div>
+        </div>
+        <div id="logList" class="log-list"></div>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

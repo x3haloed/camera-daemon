@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from urllib.parse import urlparse
 
+from .config import config_to_dict
 from .runtime import CameraBroker
+
+
+STATIC_DIR = Path(__file__).parent / "static"
+CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+}
 
 
 class StatusHTTPServer:
@@ -22,7 +32,15 @@ class StatusHTTPServer:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 path = urlparse(self.path).path
-                if path == "/health":
+                if path == "/":
+                    self._write_static("index.html")
+                elif path == "/app.css":
+                    self._write_static("app.css")
+                elif path == "/app.js":
+                    self._write_static("app.js")
+                elif path == "/config":
+                    self._write_json({"config": config_to_dict(broker.config)})
+                elif path == "/health":
                     self._write_json(broker.status())
                 elif path == "/cameras":
                     self._write_json({"cameras": broker.cameras_status()})
@@ -37,6 +55,21 @@ class StatusHTTPServer:
                 data = json.dumps(payload).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _write_static(self, filename):
+                path = STATIC_DIR / filename
+                try:
+                    data = path.read_bytes()
+                except FileNotFoundError:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b"Not found")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", CONTENT_TYPES.get(path.suffix, "application/octet-stream"))
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)

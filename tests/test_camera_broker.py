@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from urllib.request import urlopen
 import json
 import time
 
@@ -7,6 +8,7 @@ import numpy as np
 import pytest
 
 from camera_broker.config import ConfigError, config_to_dict, default_config, load_or_create_config
+from camera_broker.http_server import StatusHTTPServer
 from camera_broker.media import FrameBuffer, encode_frame_as_jpeg, encode_frames_as_mp4, estimated_fps
 from camera_broker.models import AppConfig, BufferedFrame, CameraConfig, LimitConfig, Resolution, ServerConfig
 from camera_broker.runtime import CameraBroker, chunk_to_message
@@ -208,3 +210,22 @@ def test_config_roundtrip_has_expected_top_level_keys():
     data = config_to_dict(default_config())
 
     assert {"server", "limits", "defaults", "cameras"}.issubset(data)
+
+
+def test_http_server_serves_dashboard_and_config():
+    broker = CameraBroker(default_config())
+    server = StatusHTTPServer(broker, "127.0.0.1", 0)
+    try:
+        server.start()
+        port = server._server.server_address[1]
+
+        with urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
+            html = response.read().decode("utf-8")
+        with urlopen(f"http://127.0.0.1:{port}/config", timeout=2) as response:
+            config = json.loads(response.read())
+
+        assert "Camera Broker" in html
+        assert config["config"]["cameras"][0]["id"] == "esp32-cam"
+    finally:
+        server.stop()
+        broker.stop()

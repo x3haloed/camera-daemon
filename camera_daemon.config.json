@@ -30,8 +30,8 @@
   "idleGraceSeconds": 2.0,
   "cameras": [
     {
-      "id": "esp32-cam",
-      "nickname": "ESP32-CAM",
+      "id": "esp32-cam-1",
+      "nickname": "ESP32-CAM-1",
       "streamUrl": "http://192.168.128.115:81/stream",
       "enabled": true
     }
